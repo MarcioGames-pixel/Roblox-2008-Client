@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       binary_path:
-        description: "Caminho de um EXE/DLL no repositório; vazio = detectar todos"
+        description: "Caminho de um EXE/DLL no repositório; vazio = detectar cliente e dependências"
         required: false
         default: ""
 
@@ -48,10 +48,13 @@ jobs:
       - name: Find and decompile client binaries
         shell: bash
         env:
-          BINARY_PATH: ${{ inputs.binary_path }}
+          BINARY_PATH: \${{ inputs.binary_path }}
         run: |
           set -euo pipefail
           mkdir -p artifacts
+          PROJECT_DIR="$RUNNER_TEMP/ghidra-projects"
+          mkdir -p "$PROJECT_DIR"
+
           if [ -n "$BINARY_PATH" ]; then
             if [ ! -f "$BINARY_PATH" ]; then
               echo "Arquivo não encontrado: $BINARY_PATH"
@@ -59,27 +62,52 @@ jobs:
             fi
             printf '%s\n' "$BINARY_PATH" > "$RUNNER_TEMP/binaries.txt"
           else
-            find . -type f \( -iname '*.exe' -o -iname '*.dll' -o -iname '*.ocx' -o -iname '*.sys' \) \
-              -not -path './.git/*' -print | sort > "$RUNNER_TEMP/binaries.txt"
+            : > "$RUNNER_TEMP/binaries.txt"
+            : > "$RUNNER_TEMP/primary-binaries.txt"
+            : > "$RUNNER_TEMP/other-binaries.txt"
+
+            # Primeiro tenta os executáveis que parecem ser o cliente Roblox.
+            find . -type f -iname 'roblox*.exe' -not -path './.git/*' \
+              -not -path './artifacts/*' -print | sort > "$RUNNER_TEMP/primary-binaries.txt"
+
+            # Depois os demais executáveis; DLLs de runtimes redistribuíveis são ignoradas.
+            find . -type f -iname '*.exe' -not -path './.git/*' \
+              -not -path './artifacts/*' -print | sort >> "$RUNNER_TEMP/other-binaries.txt"
+            find . -type f \( -iname '*.dll' -o -iname '*.ocx' -o -iname '*.sys' \) \
+              -not -path './.git/*' -not -path './artifacts/*' \
+              -not -path '*/Microsoft.VC*' \
+              -not -iname 'msvcp*.dll' -not -iname 'msvcr*.dll' -not -iname 'msvcm*.dll' \
+              -print | sort >> "$RUNNER_TEMP/other-binaries.txt"
+
+            cat "$RUNNER_TEMP/primary-binaries.txt" "$RUNNER_TEMP/other-binaries.txt" \
+              | awk '!seen[$0]++' > "$RUNNER_TEMP/binaries.txt"
+
+            if [ ! -s "$RUNNER_TEMP/primary-binaries.txt" ]; then
+              echo "Aviso: nenhum EXE com nome Roblox*.exe foi encontrado."
+              echo "Os outros executáveis serão analisados primeiro; informe binary_path para escolher o cliente exato."
+            fi
           fi
 
           if [ ! -s "$RUNNER_TEMP/binaries.txt" ]; then
-            echo "Nenhum EXE/DLL/OCX/SYS encontrado. Adicione o binário ao repositório ou informe binary_path."
+            echo "Nenhum EXE/DLL/OCX/SYS elegível encontrado. Adicione o binário ao repositório ou informe binary_path."
             exit 1
           fi
+
+          echo "Binários na fila:"
+          cat "$RUNNER_TEMP/binaries.txt"
 
           while IFS= read -r binary; do
             [ -n "$binary" ] || continue
             file_name="$(basename "$binary")"
             safe_name="$(printf '%s' "$file_name" | tr -cs 'A-Za-z0-9._-' '_')"
             id="$(printf '%s' "$binary" | sha256sum | cut -c1-10)"
-            output_dir="$GITHUB_WORKSPACE/artifacts/${safe_name}_${id}"
-            project_name="RBX_${id}"
+            output_dir="$GITHUB_WORKSPACE/artifacts/\${safe_name}_\${id}"
+            project_name="RBX_\${id}"
             mkdir -p "$output_dir"
 
             echo "::group::Ghidra: $binary"
             "$GHIDRA_HOME/support/analyzeHeadless" \
-              "$RUNNER_TEMP/ghidra-projects" "$project_name" \
+              "$PROJECT_DIR" "$project_name" \
               -import "$GITHUB_WORKSPACE/$binary" -overwrite \
               -scriptPath "$GITHUB_WORKSPACE/ghidra_scripts" \
               -postScript ExportDecompiledC.java "$output_dir" \

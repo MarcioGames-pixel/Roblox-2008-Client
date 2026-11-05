@@ -48,7 +48,7 @@ jobs:
       - name: Find and decompile client binaries
         shell: bash
         env:
-          BINARY_PATH: \${{ inputs.binary_path }}
+          BINARY_PATH: ${{ inputs.binary_path }}
         run: |
           set -euo pipefail
           mkdir -p artifacts
@@ -73,8 +73,8 @@ jobs:
             file_name="$(basename "$binary")"
             safe_name="$(printf '%s' "$file_name" | tr -cs 'A-Za-z0-9._-' '_')"
             id="$(printf '%s' "$binary" | sha256sum | cut -c1-10)"
-            output_dir="$GITHUB_WORKSPACE/artifacts/\${safe_name}_\${id}"
-            project_name="RBX_\${id}"
+            output_dir="$GITHUB_WORKSPACE/artifacts/${safe_name}_${id}"
+            project_name="RBX_${id}"
             mkdir -p "$output_dir"
 
             echo "::group::Ghidra: $binary"

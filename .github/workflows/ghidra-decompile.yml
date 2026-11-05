@@ -1,0 +1,98 @@
+name: Ghidra decompile Roblox 2008 client
+
+on:
+  workflow_dispatch:
+    inputs:
+      binary_path:
+        description: "Caminho de um EXE/DLL no repositório; vazio = detectar todos"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  decompile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Download official Ghidra release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ghidra"
+          curl -fsSL https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest -o "$RUNNER_TEMP/ghidra-release.json"
+          asset_url="$(jq -r '[.assets[] | select(.name | test("^ghidra_.*_PUBLIC_.*\\.zip$"))][0].browser_download_url // empty' "$RUNNER_TEMP/ghidra-release.json")"
+          if [ -z "$asset_url" ]; then
+            echo "Não encontrei o ZIP oficial do Ghidra na release mais recente."
+            exit 1
+          fi
+          curl -fL "$asset_url" -o "$RUNNER_TEMP/ghidra.zip"
+          unzip -q "$RUNNER_TEMP/ghidra.zip" -d "$RUNNER_TEMP/ghidra"
+          ghidra_home="$(find "$RUNNER_TEMP/ghidra" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          if [ -z "$ghidra_home" ] || [ ! -x "$ghidra_home/support/analyzeHeadless" ]; then
+            echo "Instalação do Ghidra não encontrada após extrair o ZIP."
+            exit 1
+          fi
+          echo "GHIDRA_HOME=$ghidra_home" >> "$GITHUB_ENV"
+
+      - name: Find and decompile client binaries
+        shell: bash
+        env:
+          BINARY_PATH: ${{ inputs.binary_path }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          if [ -n "$BINARY_PATH" ]; then
+            if [ ! -f "$BINARY_PATH" ]; then
+              echo "Arquivo não encontrado: $BINARY_PATH"
+              exit 1
+            fi
+            printf '%s\n' "$BINARY_PATH" > "$RUNNER_TEMP/binaries.txt"
+          else
+            find . -type f \( -iname '*.exe' -o -iname '*.dll' -o -iname '*.ocx' -o -iname '*.sys' \) \
+              -not -path './.git/*' -print | sort > "$RUNNER_TEMP/binaries.txt"
+          fi
+
+          if [ ! -s "$RUNNER_TEMP/binaries.txt" ]; then
+            echo "Nenhum EXE/DLL/OCX/SYS encontrado. Adicione o binário ao repositório ou informe binary_path."
+            exit 1
+          fi
+
+          while IFS= read -r binary; do
+            [ -n "$binary" ] || continue
+            file_name="$(basename "$binary")"
+            safe_name="$(printf '%s' "$file_name" | tr -cs 'A-Za-z0-9._-' '_')"
+            id="$(printf '%s' "$binary" | sha256sum | cut -c1-10)"
+            output_dir="$GITHUB_WORKSPACE/artifacts/${safe_name}_${id}"
+            project_name="RBX_${id}"
+            mkdir -p "$output_dir"
+
+            echo "::group::Ghidra: $binary"
+            "$GHIDRA_HOME/support/analyzeHeadless" \
+              "$RUNNER_TEMP/ghidra-projects" "$project_name" \
+              -import "$GITHUB_WORKSPACE/$binary" -overwrite \
+              -scriptPath "$GITHUB_WORKSPACE/ghidra_scripts" \
+              -postScript ExportDecompiledC.java "$output_dir" \
+              -analysisTimeoutPerFile 3600
+            echo "::endgroup::"
+          done < "$RUNNER_TEMP/binaries.txt"
+
+          cp "$RUNNER_TEMP/binaries.txt" artifacts/analyzed-binaries.txt
+
+      - name: Upload decompiled C output
+        uses: actions/upload-artifact@v4
+        with:
+          name: roblox-2008-ghidra-decompiled
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
